@@ -1,5 +1,9 @@
 '''
-#QeoMATH module code copyright Harrison M Reid, 2023. All rights reserved.
+#QeoMATH is free software, released under the GNU General Public License v2.0.
+This software is provided AS-IS, and the developer is not responsible for ANY
+problems that its use may cause.
+Originally, this project was supported by Fladgate Exploration and Consulting Corp.
+Go check them out at www.fladgateexploration.com!
 Requires the following modules:
 import numpy as np
 import matplotlib.pyplot as plt
