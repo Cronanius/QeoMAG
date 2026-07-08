@@ -21,6 +21,8 @@ import traceback
 import math
 import QeoMAG as qg
 import os
+#import utm
+from pyproj import Transformer, Geod
 
 def fourthDiff(*vals):
     if len(vals) != 5: return None
@@ -75,10 +77,21 @@ def dataLoad(filename, data_object): #loads the data from a file
     data_object.clear()
     data_array = None
     with open(filename, 'r') as datafile:
-        for line in datafile:
-            line = line.strip()
-            columns = line.split()
-            data_object.append(columns)
+        if (filename.endswith('.txt')):
+            for line in datafile: #check for/remove spaces in txt
+                line = line.strip()
+                columns = line.split()
+                data_object.append(columns)
+        elif (filename.endswith('.csv')):
+            for line in datafile: #check for/remove commas in csv
+                line = line.strip()
+                columns = line.split(',')
+                data_object.append(columns)
+        else:
+            for line in datafile: #other files
+                line = line.strip()
+                columns = line.split()
+                data_object.append(columns)
         headers = data_object[0]
         convertedData = dataConvert(data_object)
         if type(convertedData) is str:
@@ -117,142 +130,382 @@ def dataConvert(data_object): #DATA OBJECT MUST ALREADY BE STRIPPED AND SPLIT AN
         return data
 
 
-def dataClean(data_object): #removes all data except the last chunk in the file.
-    glyphdict = {'A': 0.01,'B': 0.02,'C': 0.03,'D': 0.04,'E': 0.05,'F': 0.06,
-                 'G': 0.07,'H': 0.08,'I': 0.09,'J': 0.10,'K': 0.11,'L': 0.12,
-                 'M': 0.13,'N': 0.14,'O': 0.15,'P': 0.16,'Q': 0.17,'R': 0.18,
-                 'S': 0.19,'T': 0.20,'U': 0.21,'V': 0.22,'W': 0.23,'X': 0.24,
-                 'Y': 0.25,'Z': 0.26}
-    idx = -1
-    mdx = len(data_object) - 1
-    eofx = -1
-    stix = -1
-    for line in reversed(data_object):
-        idx += 1
-        if len(line) > 0:
-            if line[0] == 'end':
-                eofx = mdx - idx - 2
-                print(eofx)
-                continue
-            if line[0] == 'time':
-                stix = mdx - idx
-                print(stix)
-                break
-        else:
-            continue
-    data = list(data_object[stix:eofx])
+def dataClean(data_object, filetype, current_CRS, target_CRS):
 
-    badlineCounter = 0
-    template = -1
-    #headers = data[0].strip()
-    headers = data[0]
+    #perform a filetype test. Current types = 'MagArrow2', 'GEMsys', and 'AeroSmartMag'
+    #see QeoMAG.setSensorTypeConnect for the matching list
+    if filetype == 'GEMsys': #removes all data except the last chunk in the file.
+        glyphdict = {'A': 0.01,'B': 0.02,'C': 0.03,'D': 0.04,'E': 0.05,'F': 0.06,
+                     'G': 0.07,'H': 0.08,'I': 0.09,'J': 0.10,'K': 0.11,'L': 0.12,
+                     'M': 0.13,'N': 0.14,'O': 0.15,'P': 0.16,'Q': 0.17,'R': 0.18,
+                     'S': 0.19,'T': 0.20,'U': 0.21,'V': 0.22,'W': 0.23,'X': 0.24,
+                     'Y': 0.25,'Z': 0.26}
+        idx = -1
+        mdx = len(data_object) - 1
+        eofx = -1
+        stix = -1
+        for line in reversed(data_object):
+            idx += 1
+            if len(line) > 0:
+                if line[0] == 'end':
+                    eofx = mdx - idx - 2
+                    print(eofx)
+                    continue
+                if line[0] == 'time':
+                    stix = mdx - idx
+                    print(stix)
+                    break
+            else:
+                continue
+        data = list(data_object[stix:eofx])
+
+        badlineCounter = 0
+        template = -1
+        #headers = data[0].strip()
+        headers = data[0]
+        channel = {}
+        for i in range(len(headers)): channel[headers[i]] = i
+        #CAN NOW CALL COLUMNS by eg. line[channel['utmN']]
+        ypr = False #yaw/pitch/roll check
+        laserCh = True #defaults to a laser channel existing
+
+        if len(data[0]) >= 22 and 'yaw' in data[0]:
+            ypr = True
+            idx = -1
+            if 'laser' not in data[0]: laserCh = False
+            for line in data: #removes pitch roll and yaw data
+                idx += 1
+                if idx < 1: continue #skips header line
+                line.pop(channel['roll'])
+                line.pop(channel['pitch'])
+                line.pop(channel['yaw'])
+                if laserCh == False: line.append('000.00')
+            if laserCh == False:
+                data[0] = data[0] + ['laser']
+                laserCh = True
+
+        #this system uses the length of the line to determine data viability
+
+        if len(data[0]) == 19 and 'laser' not in data[0]: #old sensor no laser
+            data[0] = data[0] + ['laser']
+            jdx = -1
+            for line in data:
+                jdx += 1
+                if jdx > 0:
+                    line.append('000.00') #adds dead laser data
+        idx = -1
+        for line in data:
+            idx += 1
+            if len(line) < 1: data.pop(idx)
+            else: continue
+
+        idx = -1
+        for line in data: #concatenates the UTM zone number and letter into a decimal number
+            idx =+ 1
+            if line[0] == 'time': continue #skips header line
+            if len(line) == 21: #"Template 1" Concatenates zone columns only
+                template = 1
+                if len(line[19]) == 1:
+                    a = glyphdict[line[19]] + float(line[18])
+                    line.pop(19)
+                    line.pop(18)
+                    line.insert(18, str(a))
+                    continue
+            if len(line) == 19:#'Template 2' splits alt/sat columns only
+                template = 2
+                if len(line[16]) == 9:
+                    strA = line[16][:6:]
+                    strB = line[16][7::]
+                    line.pop(16)
+                    line.insert(16, strA)
+                    line.insert(17, strB)
+                if len(line[18]) == 3 and len(line[16]) == 6: #performs UTM conversion if necessary
+                    a = glyphdict[line[18][2::]] + float(line[18][:2:])
+                    line[18] = str(a)
+                continue
+            if len(line) == 20: #"Templates 3 and 4(already perfect)"
+                if len(line[18]) == 1 and len(line[16]) == 9: #'Template 3' Splits Alt/Sat cand concatenates UTM zone
+                    template = 3
+                    #concatenates UTM
+                    a = glyphdict[line[18]] + float(line[17])
+                    line.pop(18)
+                    line.pop(17)
+                    line.insert(17, str(a))
+                    #splits Alt/Sat
+                    strA = line[16][:6:]
+                    strB = line[16][7::]
+                    line.pop(16)
+                    line.insert(16, strA)
+                    line.insert(17, strB)
+                    continue
+                elif len(line[18]) == 3 and len(line[16]) == 6: #'Template 4' converts UTM to float
+                    template = 4
+                    #converts UTM zone to float
+                    a = glyphdict[line[18][2::]] + float(line[18][:2:])
+                    line[18] = str(a)
+                    continue
+                elif len(line[18]) == 3 and len(line[16]) == 7: #'Template 5' converts UTM to float
+                    template = 5
+                    #converts UTM zone to float
+                    a = glyphdict[line[18][2::]] + float(line[18][:2:])
+                    line[18] = str(a)
+                    continue
+                elif len(line[18]) == 4 or len(line[18]) == 5 and len(line[16]) == 6:
+                    template = 5 #data is already in "good" format
+                    continue
+                else: #'Template 0' data format unknown, but length is correct
+                    template = 0
+                    data_object.pop(idx)
+                    idx += -1
+                    badlineCounter += 1
+                    continue
+            data_object.pop(idx)
+            idx += -1
+            badlineCounter += 1
+            #continue unnecessary
+        if ypr == True:
+            data[0].pop(channel['roll'])
+            data[0].pop(channel['pitch'])
+            data[0].pop(channel['yaw'])
+        print('Bad lines removed: ', badlineCounter)
+        print("Template: ", template)
+        return data
+    #MagArrow II CSV data import may necessitate NMEA-0183 removal or separation
+    elif filetype == 'MagArrow2':
+        data = list(data_object)
+        headers = data[0]
+        channel = {}
+
+
+        header_appends = ['GgaUTCFix', 'GgaLatitude', 'GgaLatDirection', 'GgaLongitude', 'GgaLonDirection', 'GgaGPSQuality', 'GgaSatsUsed', 'GgaHDOP', 'GgaOrthoHeight', 'GgaOrthoHeightUnits', 'GgaGeoidSeparation', 'GgaGeoSepUnits', 'GgaDGPSAge', 'GgaChecksum', 'RmcSentence', 'RmcUTCFix', 'RmcStatus', 'RmcLatitude', 'RmcLatDirection', 'RmcLongitude', 'RmcLonDirection', 'RmcGroundspeedKnots', 'RmcTrackAngleDegs', 'RmcDDMMYY', 'RmcMagVariationDegs', 'RmcBlank', 'RmcUnkown','RmcChecksum'] #, 'GgaChecksumOK', 'RmcChecksumOK', 'Mask']
+        #Note that a mask channel has been added here, and following the convention in the file, is capitalized.
+        #Also, not all channels will remain; certain unnecessary text channels will be popped, but only after the data is validated against the checksums!
+        for i in range(len(headers)): channel[headers[i]] = i
+
+        transformer = Transformer.from_crs(current_CRS, target_CRS, always_xy=True) #generates the CRS transformer one time. Currently hardcoded. Should be made variable via the GUI.
+        idx = -1
+        for line in data:
+            idx += 1
+            while (len(line) > 10): line.pop(10) #removes unnecessary data
+            if idx == 0:
+                headers = data[0]
+                headers = headers + ['utmE', 'utmN']
+                print(headers)
+                for i in range(len(headers)): channel[headers[i]] = i
+                #data.pop(0)
+                continue
+            #convert date to YYYYMMDD format
+            if line[channel['Date']] == '': line[channel['Date']] = 0.0
+            else:
+                Date = line[channel['Date']]
+                year = Date[:4]
+                mo = Date[5:7]
+                da = Date[8:]
+                line[channel['Date']] = float(year + mo + da)
+            #convert time to decimal seconds after midnight format
+            if line[channel['Time']] == '': line[channel['Time']] = 0.0
+            else:
+                Time = line[channel['Time']]
+                if Time[1] == ':': #earlier than 10:00am
+                    hrs = float(Time[0]) * 3600.0
+                    mins = float(Time[2:4]) * 60.0
+                    secs = float(Time[5:7])
+                    decs = float('0.' + Time[8:])
+                    line[channel['Time']] = hrs + mins + secs + decs
+                else: #10:00am or later
+                    hrs = float(Time[0:2]) * 3600.0
+                    mins = float(Time[3:5]) * 60.0
+                    secs = float(Time[6:8])
+                    decs = float('0.' + Time[9:])
+                    line[channel['Time']] = hrs + mins + secs + decs
+            #for cell in line: cell = float(cell)
+            #convert lat/lon to UTM - this should get moved into a later process/stage where the coords are converted in the numpy arrays, as it's much faster. This will do for now.
+            #latlonCoords = (line[channel['Latitude']], line[channel['Longitude']])
+            #print('Latitude: ', line[channel['Latitude']])
+            #print('Longitude: ', line[channel['Longitude']])
+
+            while len(line) < len(headers): line.append(0.0) #ensure columns get padded out.
+            if len(line) > len(headers): print('WARNING! Missing column headers!')
+            #Need a function to perform coord system (re-)projections: reProjectCRS (too slow, can't be generating the transformer every time)
+            #easting, northing = reProjectCRS('4326', '26915', float(line[channel['Longitude']]), float(line[channel['Latitude']])) #hardcoding for meow, will set up a variable system later
+            easting, northing = transformer.transform(line[channel['Longitude']], line[channel['Latitude']])
+            line[channel['utmE']] = easting
+            line[channel['utmN']] = northing
+
+            ''' #commented out this more extensive cleanup tech because I didn't have time to get it working right. TBD.
+            idx = -1
+            for line in data:
+                idx += 1
+                if idx == 0:  #fixes header line
+                    if headers[29] == 'RmcSentence':
+                        headers = headers[:29] + header_appends
+                        for i in range(len(headers)): channel[headers[i]] = i
+                        data[0] = headers #changes headers in the data list itself
+                else:
+                    #pad 21 zeroes to non-NMEA lines
+                    if len(line) > len(headers): print('WARNING! ROW EXTENDS BEYOND HEADERS!!')
+                    elif len(line) < len(headers):
+                        zeropad = [0.0] * (len(headers) - len(line))
+                        line = line + zeropad
+                    #convert date to YYYYMMDD format
+                    if line[channel['Date']] == '': line[channel['Date']] = 0.0
+                    else:
+                        Date = line[channel['Date']]
+                        YYYY = Date[:4]
+                        MM = Date[5:7]
+                        DD = Date[8:]
+                        line[channel['Date']] = float(YYYY + MM + DD)
+                    #convert time to decimal seconds after midnight format
+                    if line[channel['Time']] == '': line[channel['Time']] = 0.0
+                    else:
+                        Time = line[channel['Time']]
+                        if Time[1] == ':': #earlier than 10:00am
+                            HH = float(Time[0])*3600.0
+                            MM = float(Time[2:4])*60.0
+                            SS = float(Time[5:7])
+                            ZZZ = float('0.' + Time[8:])
+                            line[channel['Time']] = HH + MM + SS + ZZZ
+                        else: #10:00am or later
+                            HH = float(Time[0:2])*3600.0
+                            MM = float(Time[3:5])*60.0
+                            SS = float(Time[6:8])
+                            ZZZ = float('0.' + Time[9:])
+                            line[channel['Time']] = HH + MM + SS + ZZZ
+                    #convert LocationSource to number: N = 0, I = 1, G = 2
+                    LSource = {'N': 0.0, 'I': 1.0, 'G': 2.0, '': 0.0}
+                    if line[channel['LocationSource']] in LSource:
+                        line[channel['LocationSource']] = LSource[line[channel['LocationSource']]]
+                    else: print('Warning! Check LocationSource channel for erroneous data!!')
+                    #convert VariationDirection to number: ' ' = 0, other = 1 (?)
+                    #Unsure what kind of outputs this channel can have atm.
+                    if line[channel['VariationDirection']] == ' ': line[channel['VariationDirection']] = 0.0
+                    elif line[channel['VariationDirection']] != '':
+                        print('Warning! Check VariationDirection channel for erroneous data!!')
+                    #convert GgaSentence to number: 614660
+                    if line[channel['GgaSentence']] == '$GNGGA': line[channel['GgaSentence']] = 614660.0
+                    #convert GgaLatDirection to number: N = 360, S = 180
+                    AziDict = {'N': 360.0, 'E': 90.0, 'S': 180.0, 'W': 270.0, '': 0.0}
+                    if line[channel['GgaLatDirection']] in AziDict:
+                        line[channel['GgaLatDirection']] = AziDict[line[channel['GgaLatDirection']]]
+                    else: print('Warning! Check GgaLatDirection channel for erroneous data!!')
+                    #convert GgaLonDirection to number: E = 90, W = 270
+                    if line[channel['GgaLonDirection']] in AziDict:
+                        line[channel['GgaLonDirection']] = AziDict[line[channel['GgaLonDirection']]]
+                    else: print('Warning! Check GgaLonDirection channel for erroneous data!!')
+                    #convert Gga20:38:14.000	-6OrthoHeightUnits to number: 13
+                    if line[channel['GgaOrthoHeightUnits']] == 'M': line[channel['GgaOrthoHeightUnits']] = 13.0
+                    #convert GgaGeoSepUnits to number: 13
+                    if line[channel['GgaGeoSepUnits']] == 'M': line[channel['GgaGeoSepUnits']] = 13.0
+                    #convert GgaChecksum to hex and then to dec
+                    #print('GgaChecksum = ', line[channel['GgaChecksum']])
+                    line[channel['GgaChecksum']] = str(line[channel['GgaChecksum']])
+                    if len(line[channel['GgaChecksum']]) > 3:
+                        ggahexsum = line[channel['GgaChecksum']][5:7]
+                        line[channel['GgaChecksum']] = float(int(ggahexsum, 16))
+                    else: line[channel['GgaChecksum']] = float(line[channel['GgaChecksum']])
+                    #convert RmcSentence to number: 71418133
+                    if line[channel['RmcSentence']] == '$GNRMC': line[channel['RmcSentence']] = 71418133.0
+                    #convert RmcStatus to number: V = 1, A = 2
+                    if line[channel['RmcStatus']] == 'V': line[channel['RmcStatus']] = 1.0
+                    if line[channel['RmcStatus']] == 'A': line[channel['RmcStatus']] = 2.0
+                    #convert RmcLatDirection to number: N = 360, S = 180
+                    if line[channel['RmcLatDirection']] in AziDict:
+                        line[channel['RmcLatDirection']] = AziDict[line[channel['RmcLatDirection']]]
+                    else: print('Warning! Check RmcLatDirection channel for erroneous data!!', line[channel['RmcLatDirection']])
+                    #convert RmcLonDirection to number: E = 90, W = 270
+                    if line[channel['RmcLonDirection']] in AziDict:
+                        line[channel['RmcLonDirection']] = AziDict[line[channel['RmcLonDirection']]]
+                    else: print('Warning! Check RmcLonDirection channel for erroneous data!!', line[channel['RmcLonDirection']])
+                    #convert RmcChecksum to hex and then to dec
+                    line[channel['RmcChecksum']] = str(line[channel['RmcChecksum']])
+                    print('RmcChecksum = ' + line[channel['RmcChecksum']])
+                    if line[channel['RmcChecksum']][1] == '*':
+                        rmchexsum = line[channel['RmcChecksum']][2:4]
+                        line[channel['RmcChecksum']] = float(int(rmchexsum, 16))
+                    else: line[channel['RmcChecksum']] = float(line[channel['RmcChecksum']])
+                    #convert all empty cells to floating zeroes
+                    for cell in line:
+                        if cell == '': cell = 0.0 #convert any null values to 0
+                        cell = float(cell)
+            '''
+
+        data[0] = headers
+        print(data[1])
+        return data
+    #AeroSmartMag needs to detect whether it's running in lat/long or UTM mode. Haven't done this, yet.
+    elif filetype == 'AeroSmartMag':
+        data = list(data_object)
+        headers = data[0]
+        channel= {}
+        for i in range(len(headers)): channel[headers[i]] = i
+        #change channel names (Easting, Northing, Mag) to be compatible with current code. Remove in the future when x and y channels are selectable.
+        #print(headers)
+        headers[channel['Easting']] = 'utmE'
+        headers[channel['Northing']] = 'utmN'
+        headers[channel['Field']] = 'Mag'
+        headers.pop(channel['FW549'])
+        for i in range(len(headers)): channel[headers[i]] = i
+
+        idx = -1
+        for line in data_object:
+            idx += 1
+
+            if idx == 0: continue
+            #convert UTC_date: "DD-MM-YYYY" to "YYYYMMDD"
+            Date = line[channel['UTC_date']]
+
+            year = Date[len(Date) - 4:] #parses from the back of the date, since I currently have no data with single-digit day values to check output format against
+            mo = Date[len(Date) - 7:len(Date) - 5] #I assume that this was unncessary, and that the ASM outputs day 1 as 01-MM-YYYY, but it's worth it to look this up
+            da = Date[:len(Date) - 8]
+            line[channel['UTC_date']] = year + mo + da
+            #convert UTC_time: "HH:MM:SS.ZZZ" to decimal seconds past midnight
+            Time = line[channel['UTC_time']]
+            hrs = float(Time[:2]) * 3600.0
+            mins = float(Time[3:5]) * 60.0
+            secs = float(Time[6:])
+            line[channel['UTC_time']] = str(hrs + mins + secs)
+            #convert Device: "ASM" to "11913"
+            if line[channel['Device']] == 'ASM': line[channel['Device']] = '11913.0'
+            else:
+                line[channel['Device']] = '0.0'
+                print('Device channel != "ASM", set value to 0.')
+            #convert SN: "104AG" to "104"
+            sn = line[channel['SN']]
+            line[channel['SN']] = sn[:-2]
+            #convert Hemisphere: N to "1", S to "2"
+            if 'Hemisphere' in headers:
+                if line[channel['Hemisphere']] == 'N': line[channel['Hemisphere']] = '1.0'
+                if line[channel['Hemisphere']] == 'S': line[channel['Hemisphere']] = '2.0'
+            #pad additional columns with 0s
+            while len(line) < len(headers): line.append('0.0')
+            if len(line) > len(headers): print('WARNING! Missing column headers!')
+            #"	"<- tab character (these files are tab-delimited, but it seems that the str.split() function handles that okay)
+
+        print(data[1])
+        return data
+
+def projTransform(data_object, headers, current_CRS, target_CRS, x_inCx='Longitude', y_inCx='Latitude', x_outCx='utmE', y_outCx='utmN'):
+    #reprojects the CRS. I've set this one up to accept variable channel identifiers
+    #in a move towards generic processing capability.
+    #'Cx' will be used as shorthand for 'Channel'
+    transformer = Transformer.from_crs(current_CRS, target_CRS, always_xy=True)
+
+    idx = -1
+    idxlist = []
     channel = {}
     for i in range(len(headers)): channel[headers[i]] = i
-    #CAN NOW CALL COLUMNS by eg. line[channel['utmN']]
-    ypr = False #yaw/pitch/roll check
-    laserCh = True #defaults to a laser channel existing
 
-    if len(data[0]) >= 22 and 'yaw' in data[0]:
-        ypr = True
-        idx = -1
-        if 'laser' not in data[0]: laserCh = False
-        for line in data: #removes pitch roll and yaw data
-            idx += 1
-            if idx < 1: continue #skips header line
-            line.pop(channel['roll'])
-            line.pop(channel['pitch'])
-            line.pop(channel['yaw'])
-            if laserCh == False: line.append('000.00')
-        if laserCh == False:
-            data[0] = data[0] + ['laser']
-            laserCh = True
+    for line in data_object:
+        x, y = transformer.transform(line[channel[x_inCx]], line[channel[y_inCx]])
+        line[channel[x_outCx]] = x
+        line[channel[y_outCx]] = y
 
-    #this system uses the length of the line to determine data viability
+    return data_object
 
-    if len(data[0]) == 19 and 'laser' not in data[0]: #old sensor no laser
-        data[0] = data[0] + ['laser']
-        jdx = -1
-        for line in data:
-            jdx += 1
-            if jdx > 0:
-                line.append('000.00') #adds dead laser data
-    idx = -1
-    for line in data:
-        idx += 1
-        if len(line) < 1: data.pop(idx)
-        else: continue
-
-    idx = -1
-    for line in data: #concatenates the UTM zone number and letter into a decimal number
-        idx =+ 1
-        if line[0] == 'time': continue #skips header line
-        if len(line) == 21: #"Template 1" Concatenates zone columns only
-            template = 1
-            if len(line[19]) == 1:
-                a = glyphdict[line[19]] + float(line[18])
-                line.pop(19)
-                line.pop(18)
-                line.insert(18, str(a))
-                continue
-        if len(line) == 19:#'Template 2' splits alt/sat columns only
-            template = 2
-            if len(line[16]) == 9:
-                strA = line[16][:6:]
-                strB = line[16][7::]
-                line.pop(16)
-                line.insert(16, strA)
-                line.insert(17, strB)
-            if len(line[18]) == 3 and len(line[16]) == 6: #performs UTM conversion if necessary
-                a = glyphdict[line[18][2::]] + float(line[18][:2:])
-                line[18] = str(a)
-            continue
-        if len(line) == 20: #"Templates 3 and 4(already perfect)"
-            if len(line[18]) == 1 and len(line[16]) == 9: #'Template 3' Splits Alt/Sat cand concatenates UTM zone
-                template = 3
-                #concatenates UTM
-                a = glyphdict[line[18]] + float(line[17])
-                line.pop(18)
-                line.pop(17)
-                line.insert(17, str(a))
-                #splits Alt/Sat
-                strA = line[16][:6:]
-                strB = line[16][7::]
-                line.pop(16)
-                line.insert(16, strA)
-                line.insert(17, strB)
-                continue
-            elif len(line[18]) == 3 and len(line[16]) == 6: #'Template 4' converts UTM to float
-                template = 4
-                #converts UTM zone to float
-                a = glyphdict[line[18][2::]] + float(line[18][:2:])
-                line[18] = str(a)
-                continue
-            elif len(line[18]) == 3 and len(line[16]) == 7: #'Template 5' converts UTM to float
-                template = 5
-                #converts UTM zone to float
-                a = glyphdict[line[18][2::]] + float(line[18][:2:])
-                line[18] = str(a)
-                continue
-            elif len(line[18]) == 4 or len(line[18]) == 5 and len(line[16]) == 6:
-                template = 5 #data is already in "good" format
-                continue
-            else: #'Template 0' data format unknown, but length is correct
-                template = 0
-                data_object.pop(idx)
-                idx += -1
-                badlineCounter += 1
-                continue
-        data_object.pop(idx)
-        idx += -1
-        badlineCounter += 1
-        #continue unnecessary
-    if ypr == True:
-        data[0].pop(channel['roll'])
-        data[0].pop(channel['pitch'])
-        data[0].pop(channel['yaw'])
-    print('Bad lines removed: ', badlineCounter)
-    print("Template: ", template)
-    return data
+def NMEAChecksumValidation(sentence):
+    #detect GGA or RMC
+    #for now I won't bother with this, but I should certainly start doing it and marking it in the Mask channel
+    pass
 
 def dataRepair(filePath): #attempts to repair data from a bad output stream
     with open(filePath, 'r') as datafile:
@@ -347,37 +600,66 @@ def boundaryPurge(data_object, shapefilename): #removes data from outside of a g
 
         return data_object
 
-def headingPurge(data_object, heading_azimuth=89.75, heading_tolerance=3): #removes data from turns etc
+def headingPurge(data_object, data_headers, data_type, heading_azimuth=89.75, heading_tolerance=3): #removes data from turns etc
 
     idx = -1
     idxlist = []
     badheading_counter = 0
     reverse_azimuth = 0
+    channel = {}
+    headers = data_headers
+    for i in range(len(headers)): channel[headers[i]] = i
 
     if heading_azimuth < 0.0: print("Azimuth < 0 degrees. Please input azimuth between 0.0 and 180.0")
-    elif heading_azimuth > 180.0: print("Azimuth > 360 degrees. Please input azimuth between 0.0 and 180.0")
+    elif heading_azimuth > 360.0:
+        print("Azimuth > 360 degrees. Please input azimuth between 0.0 and 360.0")
     else:
+        if heading_azimuth > 180: heading_azimuth = heading_azimuth - 180
         reverse_azimuth = math.radians(heading_azimuth) - math.pi #atan2 outputs a value between 0 and pi and 0 and -pi. This is how I'm dealing with it.
         heading_azimuth = math.radians(heading_azimuth)
         heading_tolerance = math.radians(heading_tolerance)
         heading_range = ((heading_azimuth + heading_tolerance, heading_azimuth - heading_tolerance), (reverse_azimuth - heading_tolerance, reverse_azimuth + heading_tolerance))
         print(heading_range)
+
     #elif heading_azimuth >= 180.0: reverse_azimuth = heading_azimuth - 180.0
+    if data_type == 'GEMsys':
+        for line in data_object:
+            idx += 1
+            if idx < 1: continue #skips first line, need 2 points for a heading
+            #utmE = line[channel['utmE']]
+            #utmN = line[channel['utmN']]
+            x = data_object[idx - 1][14] - data_object[idx][14]
+            y = data_object[idx - 1][15] - data_object[idx][15]
 
-    for line in data_object:
-        idx += 1
-        if idx <= 1: continue #skips first line
-        x = data_object[idx - 1][14] - data_object[idx][14]
-        y = data_object[idx - 1][15] - data_object[idx][15]
+            heading = math.atan2(y, x) #atan2 is (y, x), rather than x, y. It's dumb.
 
-        heading = math.atan2(y, x) #atan2 is (y, x), rather than x, y. It's dumb.
+            if heading_range[0][0] >= heading >= heading_range[0][1]: continue
+            if heading_range[1][0] <= heading <= heading_range[1][1]: continue
 
-        if heading_range[0][0] >= heading >= heading_range[0][1]: continue
-        if heading_range[1][0] <= heading <= heading_range[1][1]: continue
+            idxlist.append(idx)
+            badheading_counter += 1
+            continue
+    elif data_type == 'MagArrow2':
+        #print('MagArrow2 Heading Loaded')
+        #print(data_object[0])
+        #geod = Geod(ellps='WGS84')
+        for line in data_object:
+            idx += 1
+            if idx < 1: continue #skips first line, need 2 points for a heading
+            #utmE = line[channel['utmE']]
+            #utmN = line[channel['utmN']]
+            x = data_object[idx - 1][10] - data_object[idx][10] #these second indexes for some reason can't be input as variables. Unsure as to why.
+            y = data_object[idx - 1][11] - data_object[idx][11]
+            #print ("x,y", x,y)
 
-        idxlist.append(idx)
-        badheading_counter += 1
-        continue
+            heading = math.atan2(y, x) #atan2 is (y, x), rather than x, y. It's dumb.
+
+            if heading_range[0][0] >= heading >= heading_range[0][1]: continue
+            if heading_range[1][0] <= heading <= heading_range[1][1]: continue
+
+            idxlist.append(idx)
+            badheading_counter += 1
+            continue
 
     if len(idxlist) > 0:
         idxlist = np.array(idxlist)
@@ -439,28 +721,28 @@ def lineLabel(data_object, headers, start_number, line_increment, is_tieLine):
     #axis=0 should be as long as 0 to the maxiumum X value contained in the data. As long as the data is truncated, that's fine.
     #Iterate over the bins to find lines.
     #This algorithm will fail if the line spacing is closer than the fiducials in metres.
-    utm = ''
+    UTM = ''
     fiducials = 2 #THIS SHOULD BE USER INPUT. ONE FIDUCIAL = 1 METRE (one "bin")
-    if is_tieLine == False: utm = 'UTMx'
-    else: utm = 'UTMy'
+    if is_tieLine == False: UTM = 'UTMx'
+    else: UTM = 'UTMy'
     utmHigh = -1000000000.0
     utmLow = 1000000000.0
     for line in data_object:
-        if line[channel[utm]] > utmHigh: utmHigh = line[channel[utm]]
-        if line[channel[utm]] < utmLow: utmLow = line[channel[utm]]
+        if line[channel[UTM]] > utmHigh: utmHigh = line[channel[UTM]]
+        if line[channel[UTM]] < utmLow: utmLow = line[channel[UTM]]
     utmDiff = math.trunc(utmHigh - utmLow) + 2
     utmHighBin = math.trunc(utmHigh)
     utmLowBin = math.trunc(utmLow) #+ 1
     binTable = np.zeros((utmDiff, 3), dtype=int) #[0] is the truncated UTM bin, [1] is the frequency, and [2] is the lineNo
 
     for line in data_object: #frequency first, as it doesn't technically depend on the indexing column
-        #bin = math.trunc(line[channel[utm]]) - utmLowBin - 1
+        #bin = math.trunc(line[channel[UTM]]) - utmLowBin - 1
         #binTable[bin][1] += 1
-        binTable[math.trunc(line[channel[utm]]) - utmLowBin][1] += 1
+        binTable[math.trunc(line[channel[UTM]]) - utmLowBin][1] += 1
     #idx = 0
     #dataLen = len(data_object)
     #while idx < dataLen:
-    #    binTable[math.trunc(line[channel[utm]]) - utmLowBin][1] += 1
+    #    binTable[math.trunc(line[channel[UTM]]) - utmLowBin][1] += 1
     #    idx += 1
 
     #this section operates on the indexing column and creates the line numbers
@@ -501,7 +783,7 @@ def lineLabel(data_object, headers, start_number, line_increment, is_tieLine):
         data = data_object
 
     for line in data:
-        bdx = math.trunc(line[channel[utm]]) - utmLowBin
+        bdx = math.trunc(line[channel[UTM]]) - utmLowBin
         if bdx != binTable[bdx][0] - utmLowBin: print('WARNING: Bindex doesnt match index!: ' + str(bdx - 1) + ' : ' + str(binTable[bdx][0] - utmLowBin))
         line[channel['lineNo']] = float(binTable[bdx][2])
 

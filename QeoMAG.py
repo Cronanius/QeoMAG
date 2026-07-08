@@ -22,6 +22,7 @@ import os
 #import geopandas as gpd
 import QeoMATH as qm
 import traceback
+import re #good ol' regex
 
 class MainWindow(QMainWindow):
 
@@ -39,12 +40,15 @@ class MainWindow(QMainWindow):
         self.localData = None
         self.masterData = np.array([[]])
         self.listData = []
+        self.dataType = 'MagArrow2'
         self.dataHeaders = []
         self.batchList = ['Label Lines', 'Label Ties', 'Parse Bad Data']
         self.isArrayFulfilled = False
         self.toggleWriteToText = False #True means "yes, write to the text widget"
         self.masterLoadSuccess = ''
         self.isTieLine = False
+        self.currentCRS = 'EPSG:4326' #WGS84
+        self.targetCRS = 'EPSG:26915' #NAD83 UTM Zone 15N
         #self.npdata = np.array(self.localData)
         self.initUI()
 
@@ -66,11 +70,15 @@ class MainWindow(QMainWindow):
         #UI Widgetry
         self.setCentralWidget(self.widget)
 
-        self.vLayout = QVBoxLayout(self.widget)
-        self.hLayout1 = QHBoxLayout()
-        self.hLayout2 = QHBoxLayout()
-        self.vLayout.addLayout(self.hLayout1)
-        self.vLayout.addLayout(self.hLayout2)
+        self.vLayoutMain = QVBoxLayout(self.widget)
+        self.hLayoutMain01 = QHBoxLayout()
+        self.hLayoutMain02 = QHBoxLayout()
+        self.hLayoutMain03 = QHBoxLayout() #headers+refresh button
+        self.hLayoutMain04 = QHBoxLayout() #'footer' hLayout; to contain coordinate system info for now
+        self.vLayoutMain.addLayout(self.hLayoutMain01)
+        self.vLayoutMain.addLayout(self.hLayoutMain02)
+        self.vLayoutMain.addLayout(self.hLayoutMain04)
+        self.vLayoutMain.addLayout(self.hLayoutMain03)
 
         #Text display area
         self.textwidget = QPlainTextEdit()
@@ -113,21 +121,54 @@ class MainWindow(QMainWindow):
         self.magCutoffButton = QPushButton("Run Mag Cutoff", self)
         self.magCutoffButton.clicked.connect(self.magCutoff)
 
-        #Toolbars
-        self.hLayout1.addWidget(self.headingBox)
-        self.hLayout1.addWidget(self.headingToleranceBox)
-        self.hLayout1.addWidget(self.lineNoStartBox)
-        self.hLayout1.addWidget(self.lineIncrementBox)
-        self.hLayout1.addWidget(self.magCutoffBoxUpper)
-        self.hLayout1.addWidget(self.magCutoffBoxLower)
+        #Header bar
+        self.headerBar = QLabel()
+        self.headerBarRefreshButton = QPushButton('⟳ Headers')
+        width = self.headerBarRefreshButton.fontMetrics().boundingRect('⟳ Headers').width() + 7 #force smolness
+        self.headerBarRefreshButton.setMaximumWidth(width)
+        self.headerBarRefreshButton.clicked.connect(self.headerBarRefresh)
 
-        self.hLayout2.addWidget(self.arrayLabel)
-        self.hLayout2.addWidget(self.masterArrayLabel)
-        self.hLayout2.addWidget(self.arrayLoadButton)
-        self.hLayout2.addWidget(self.tieLineCheckBox)
-        self.hLayout2.addWidget(self.dateCollectedBox)
-        self.hLayout2.addWidget(self.magCutoffButton)
-        self.vLayout.addWidget(self.textwidget)
+        #Coordinate System Entry Boxen
+        self.targetCRSBox = QLineEdit()
+        self.targetCRSBox.setPlaceholderText('eg. ' + self.targetCRS)
+        self.currentCRSBox = QLineEdit()
+        self.currentCRSBox.setPlaceholderText('eg. '+ self.currentCRS)
+        self.targetCRSLabel = QLabel()
+        self.targetCRSLabel.setText(' Output CRS: ')
+        self.currentCRSlabel = QLabel()
+        self.currentCRSlabel.setText(' Input CRS: ')
+        self.reProjectCRSButton = QPushButton('⟳ CRS')
+        width = self.reProjectCRSButton.fontMetrics().boundingRect('⟳ CRS').width() + 7 #force smolness
+        self.reProjectCRSButton.setMaximumWidth(width)
+        self.reProjectCRSButton.clicked.connect(self.reProjectCRS)
+
+        #Toolbars
+        self.hLayoutMain01.addWidget(self.headingBox)
+        self.hLayoutMain01.addWidget(self.headingToleranceBox)
+        self.hLayoutMain01.addWidget(self.lineNoStartBox)
+        self.hLayoutMain01.addWidget(self.lineIncrementBox)
+        self.hLayoutMain01.addWidget(self.magCutoffBoxUpper)
+        self.hLayoutMain01.addWidget(self.magCutoffBoxLower)
+
+        self.hLayoutMain02.addWidget(self.arrayLabel)
+        self.hLayoutMain02.addWidget(self.masterArrayLabel)
+        self.hLayoutMain02.addWidget(self.arrayLoadButton)
+        self.hLayoutMain02.addWidget(self.tieLineCheckBox)
+        self.hLayoutMain02.addWidget(self.dateCollectedBox)
+        self.hLayoutMain02.addWidget(self.magCutoffButton)
+
+        self.hLayoutMain04.addWidget(self.currentCRSlabel)
+        self.hLayoutMain04.addWidget(self.currentCRSBox)
+        self.hLayoutMain04.addWidget(self.targetCRSLabel)
+        self.hLayoutMain04.addWidget(self.targetCRSBox)
+        self.hLayoutMain04.addWidget(self.reProjectCRSButton)
+
+        self.hLayoutMain03.addWidget(self.headerBar) #header bar
+        self.hLayoutMain03.addWidget(self.headerBarRefreshButton)
+
+        self.vLayoutMain.addWidget(self.textwidget)
+
+
 
         #Render the Widgetry
         self.show()
@@ -192,6 +233,11 @@ class MainWindow(QMainWindow):
         toolsmenu.addAction(addDatesButton)
 
         #Data Menu
+        self.setSensorTypeButton = QAction('Current Sensor (Toggle): ' + self.dataType, self)
+        self.setSensorTypeButton.setStatusTip('Sensor: ' + self.dataType)
+        self.setSensorTypeButton.triggered.connect(self.setSensorTypeConnect)
+        datamenu.addAction(self.setSensorTypeButton)
+
         dataCleanButton = QAction('Data Cleanup', self)
         dataCleanButton.setShortcut('Ctrl+K')
         dataCleanButton.setStatusTip('Preliminary data cleanup.')
@@ -265,30 +311,69 @@ class MainWindow(QMainWindow):
         aboutmenu.addAction(aboutButton)
 
     #wrappers for connect() to operate on the data list, since it won't accept functions with arguments.
+
     #clear the text widget and replace it with the latest in the 'data' object
     def writeDataToTextWidget(self):
-        if self.toggleWriteToText == True:
-            self.textwidget.clear()
-            s = ' '
-            if self.isArrayFulfilled == False:
-                self.textwidget.appendPlainText(s.join(self.dataHeaders))
-                for line in self.listData: self.textwidget.appendPlainText(s.join(line))
+        try:
+            if self.toggleWriteToText == True:
+                self.textwidget.clear()
+                s = ' '
+                if self.isArrayFulfilled == False:
+                    self.textwidget.appendPlainText(s.join(self.dataHeaders))
+                    for line in self.listData: self.textwidget.appendPlainText(s.join(line))
 
+                else:
+                    self.textwidget.appendPlainText(s.join(self.dataHeaders)) #leaving in for now, but needs to be removed eventually, since we're separating these into the header bar
+                    self.headerBarRefresh()
+                    for line in self.localData:
+                        strLine = ''
+                        for item in line:
+                            strLine = strLine + str(item) + ' '
+                        self.textwidget.appendPlainText(strLine)
             else:
-                self.textwidget.appendPlainText(s.join(self.dataHeaders))
-                for line in self.localData:
-                    strLine = ''
-                    for item in line:
-                        strLine = strLine + str(item) + ' '
-                    self.textwidget.appendPlainText(strLine)
-        else:
-            self.textwidget.clear()
-            self.textwidget.appendPlainText('Text outputs currently toggled off, probably to speed things up.\n Toggle text outputs on in order to see data output here.')
+                self.headerBarRefresh() #still refreshes the headerBar
+                self.textwidget.clear()
+                self.textwidget.appendPlainText('Text outputs currently toggled off, probably to speed things up.\n Toggle text outputs on in order to see data output here.')
+        except Exception as error:
+            print('Failed to write data to Text Widget. Error: ', error)
+            traceback.print_exc()
+        finally: pass
+
+    #change the sensor type to the next one in the list. This should be replaced by a submenu-list with
+    #the items on the list selectable. I'm just having internet outages and can't look up how to do this
+    def setSensorTypeConnect(self):
+        #dataTypeList = ['MagArrow2', 'GEMsys', 'AeroSmartMag'] #used for the menu list if I can get around to it
+        dataTypeDict = {'MagArrow2': 0, 'GEMsys': 1, 'AeroSmartMag': 2}
+        dataTypeDictInversed = {0: 'MagArrow2', 1: 'GEMsys', 2: 'AeroSmartMag'}
+        try:
+            idx = dataTypeDict[self.dataType]
+            if idx == 2: idx = 0 #reset to 0; CHANGE WHEN NEW SENSORS ARE ADDED!!!
+            else: idx += 1
+            self.dataType = dataTypeDictInversed[idx]
+        except Exception as error:
+            print('Failed to change sensor type. Error: ', error)
+            traceback.print_exc()
+        finally: self.setSensorTypeButton.setText('Current Sensor (Toggle): ' + self.dataType)
+
+    #just pushes the CRS in the boxen to the variables
+    def pushCRS(self):
+        try: #I don't think this actually is effective at controlling the data input, and I'll need better data sanitization
+            if bool(re.match(r'^[A-Za-z]+:[0-9]+$', self.targetCRSBox.text())) == True:
+                self.targetCRS = self.targetCRSBox.text()
+            if bool(re.match(r'^[A-Za-z]+:[0-9]+$', self.currentCRSBox.text())) == True:
+                self.currentCRS = self.currentCRSBox.text()
+        except Exception as error:
+            print('Failed to identify Coordinate Reference System (CRS).')
+            print('Please input CRS in exactly this format: AUTH:CODE; eg: EPSG:4326.')
+            traceback.print_exc()
+        finally: pass
 
     #QeoMath Algorithm Wrappers
+    #Cleans up *AND PROJECTS* data (if required)
     def dataCleanConnect(self):
         try:
-            self.listData = qm.dataClean(self.listData)
+            self.pushCRS() #pushes the CRS to "global" variable
+            self.listData = qm.dataClean(self.listData, self.dataType, self.currentCRS, self.targetCRS)
             #headers into separate list
             self.dataHeaders = self.listData[0]
             self.listData.pop(0)
@@ -298,6 +383,17 @@ class MainWindow(QMainWindow):
             print('Failed to float data. Error: ', error)
             traceback.print_exc()
         finally: self.writeDataToTextWidget()
+
+    def reProjectCRS(self):
+        if self.isArrayFulfilled == True:
+            try:
+                self.pushCRS() #pushes the CRS to "global" variable
+                self.localData = qm.projTransform(self.localData, self.dataHeaders, self.currentCRS, self.targetCRS)
+            except Exception as error:
+                print('Failed to reproject CRS data. Error: ', error)
+                traceback.print_exc()
+            finally: self.writeDataToTextWidget()
+        else: print('Error: Data not uploaded to Array')
 
     def purgeUnlockedData(self):
         if self.isArrayFulfilled == True:
@@ -329,7 +425,7 @@ class MainWindow(QMainWindow):
 
     def purgeBadHeadingData(self):
         if self.isArrayFulfilled == True:
-            try: self.localData = qm.headingPurge(self.localData, float(self.headingBox.text()),
+            try: self.localData = qm.headingPurge(self.localData, self.dataHeaders, self.dataType, float(self.headingBox.text()),
                                                   float(self.headingToleranceBox.text()))
             except Exception as error:
                 print('Failed to purge bad heading data. Error: ', error)
@@ -433,11 +529,14 @@ class MainWindow(QMainWindow):
     def batchHandler(self):
         batchWindow = batchToolWindow(self.batchList, 0, parent=self) #see __init__ for full list
 
+    def headerBarRefresh(self):
+        self.headerBar.setText(str(self.dataHeaders))
+
     #plotting routines
     def plotData(self):
         if self.isArrayFulfilled == True:
             global dataplot
-            try: dataplot = dataPlot(self.localData, self.dataHeaders, State='unrotated')
+            try: dataplot = dataPlot(self.localData, self.dataHeaders, self.dataType, State='unrotated')
             except Exception as error:
                 print('Error: Could not plot data. ', error)
                 traceback.print_exc()
@@ -446,7 +545,7 @@ class MainWindow(QMainWindow):
     def plotMasterData(self):
         if self.isArrayFulfilled == True and type(self.masterData) != None:
             global masterdataplot
-            try: masterdataplot = dataPlot(self.masterData, self.dataHeaders, State='unrotated')
+            try: masterdataplot = dataPlot(self.masterData, self.dataHeaders, self.dataType, State='unrotated')
             except Exception as error:
                 print('Error: Could not plot data. ', error)
                 traceback.print_exc()
@@ -455,7 +554,7 @@ class MainWindow(QMainWindow):
     def plotRotatedData(self):
         if self.isArrayFulfilled == True:
             global rotateddataplot
-            try: rotateddataplot = dataPlot(self.localData, self.dataHeaders, State='rotated')
+            try: rotateddataplot = dataPlot(self.localData, self.dataHeaders, self.dataType, State='rotated')
             except Exception as error:
                 print('Error: Could not plot data. ', error)
                 traceback.print_exc()
@@ -466,7 +565,7 @@ class MainWindow(QMainWindow):
             global linelabelplot
             try:
                 print('meow')
-                linelabelplot = dataPlot(self.localData, self.dataHeaders, State='lineNos')
+                linelabelplot = dataPlot(self.localData, self.dataHeaders, self.dataType, State='lineNos')
             except Exception as error:
                 print('Error: Could not plot data. ', error)
                 traceback.print_exc()
@@ -557,13 +656,17 @@ class MainWindow(QMainWindow):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
         fileName, _ = QFileDialog.getSaveFileName(self,"Save Data File", self.datafilename,
-                                                  "Text Files(*.txt);;All Files (*)", options=options)
+                                                  "CSV Files(*.csv);;Text Files(*.txt);;All Files (*)", options=options)
         if fileName:
             self.savedatafilename = fileName
-            with open(fileName, 'w') as saveFile:
-                if self.toggleWriteToText == False: self.writeToTextToggle()
-                saveFile.write(str(self.textwidget.toPlainText()))
-                if self.toggleWriteToText == True: self.writeToTextToggle()
+            if self.savedatafilename.endswith('.csv'):
+                fileHeader = ','.join(self.dataHeaders)
+                np.savetxt(self.savedatafilename, self.localData, fmt='%.12g', delimiter=",", header=fileHeader, comments='')
+            else:
+                with open(fileName, 'w') as saveFile: #change this to use a similar format as the .csv save above
+                    if self.toggleWriteToText == False: self.writeToTextToggle()
+                    saveFile.write(str(self.textwidget.toPlainText()))
+                    if self.toggleWriteToText == True: self.writeToTextToggle()
 
     def saveMasterDataDialog(self):
         options = QFileDialog.Options()
@@ -573,7 +676,7 @@ class MainWindow(QMainWindow):
         if fileName:
             self.savedatafilename = fileName
             with open(fileName, 'w') as saveFile:
-                np.savetxt(fileName, self.masterData, fmt='%.7g', delimiter=' ', header=' '.join(self.dataHeaders), comments='')
+                np.savetxt(fileName, self.masterData, fmt='%.12g', delimiter=',', header=','.join(self.dataHeaders), comments='')
                 #comments needs to be set to '' in order to avoid a leading '#' on the header line.
                 #%.7g will intelligently format everything up to 7 decimal places
                 #saveFile.write(str(self.textwidget.toPlainText()))
@@ -619,12 +722,15 @@ class MainWindow(QMainWindow):
 
 class dataPlot:
     #This section/class is used for plotting the data
-    def __init__(self, data_object, headers, State='unrotated'):
+    def __init__(self, data_object, headers, instrumentType, State='unrotated'):
+        #self.coordSys = 'UTM'
         self.plotData = data_object
         self.rectExtents = None
         self.state = State
         self.channel = {}
+        self.instrumentType = 'MagArrow2' #hardcoded: change this
         for i in range(len(headers)): self.channel[headers[i]] = i #CAN NOW CALL COLUMNS by eg. line[self.channel['utmN']]
+        #if instrumentType == 'MagArrow2': self.coordSys = 'latlon' #should change this so it's not instrument dependent
         if self.state == 'rotated': self.plotRotate()
         elif self.state == 'lineNos': self.plotLines()
         else: self.plotIt()
@@ -640,15 +746,27 @@ class dataPlot:
         self.utmN = []
         self.nT = []
 
+        self.coordSysE = 'utmE'
+        self.coordSysN = 'utmN'
+        self.magData = 'nT'
+        if self.instrumentType == 'MagArrow2': self.magData = 'Mag'
+        '''
+        #This section converts column headings to those of the specific instrument that needs them
+
+        if self.coordSys == 'latlon':
+            self.coordSysE = 'Longitude'
+            self.coordSysN = 'latitude'
+
+        '''
 
         for line in self.plotData:
-            if line[self.channel['utmE']] < self.smallest_E: self.smallest_E = line[self.channel['utmE']]
-            if line[self.channel['utmE']] > self.largest_E: self.largest_E = line[self.channel['utmE']]
-            if line[self.channel['utmN']] < self.smallest_N: self.smallest_N = line[self.channel['utmN']]
-            if line[self.channel['utmN']] > self.largest_N: self.largest_N = line[self.channel['utmN']]
-            self.utmE.append(line[self.channel['utmE']])
-            self.utmN.append(line[self.channel['utmN']])
-            self.nT.append(line[self.channel['nT']])
+            if line[self.channel[self.coordSysE]] < self.smallest_E: self.smallest_E = line[self.channel[self.coordSysE]]
+            if line[self.channel[self.coordSysE]] > self.largest_E: self.largest_E = line[self.channel[self.coordSysE]]
+            if line[self.channel[self.coordSysN]] < self.smallest_N: self.smallest_N = line[self.channel[self.coordSysN]]
+            if line[self.channel[self.coordSysN]] > self.largest_N: self.largest_N = line[self.channel[self.coordSysN]]
+            self.utmE.append(line[self.channel[self.coordSysE]])
+            self.utmN.append(line[self.channel[self.coordSysN]])
+            self.nT.append(line[self.channel[self.magData]])
 
         self.fig, self.ax = plt.subplots()
         self.cb = self.ax.scatter(self.utmE, self.utmN, s=40, c=self.nT, norm='linear', cmap='viridis')
@@ -672,8 +790,18 @@ class dataPlot:
         self.utmE = []
         self.utmN = []
         self.nT = []
-
-
+        '''
+        #This section converts column headings to those of the specific instrument that needs them
+        self.coordSysX = 'UTMx'
+        self.coordSysY = 'UTMy'
+        self.magData = 'nT'
+        if self.coordSys == 'latlon':
+            self.coordSysX = 'LonX'
+            self.coordSysY = 'LatX'
+        if self.dataType == 'MagArrow2': self.magData = 'Mag'
+        '''
+        self.magData = 'nT'
+        if self.instrumentType == 'MagArrow2': self.magData = 'Mag'
         for line in self.plotData:
             if line[self.channel['UTMx']] < self.smallest_E: self.smallest_E = line[self.channel['UTMx']]
             if line[self.channel['UTMx']] > self.largest_E: self.largest_E = line[self.channel['UTMx']]
@@ -681,7 +809,7 @@ class dataPlot:
             if line[self.channel['UTMy']] > self.largest_N: self.largest_N = line[self.channel['UTMy']]
             self.utmE.append(line[self.channel['UTMx']])
             self.utmN.append(line[self.channel['UTMy']])
-            self.nT.append(line[self.channel['nT']])
+            self.nT.append(line[self.channel[self.magData]])
 
         self.fig, self.ax = plt.subplots()
         self.cb = self.ax.scatter(self.utmE, self.utmN, s=40, c=self.nT, norm='linear', cmap='viridis')
@@ -810,7 +938,7 @@ class batchToolWindow(QMainWindow):
         self.setGeometry(self.left, self.top, self.width, self.height)
         self.widget = QWidget()
         self.setAutoFillBackground(True)
-        self.vLayout = QVBoxLayout(self.widget)
+        self.vLayoutMain = QVBoxLayout(self.widget)
         self.hLayout00 = QHBoxLayout()
         self.hLayout01 = QHBoxLayout()
         self.hLayout02 = QHBoxLayout()
@@ -870,16 +998,16 @@ class batchToolWindow(QMainWindow):
         self.hLayout02.addWidget(self.dialogButton02)
 
         #Layout integration
-        self.vLayout.addLayout(self.hLayout00)
-        self.vLayout.addWidget(self.descLabel00)
-        #self.vLayout.addSeparator()
-        self.vLayout.addLayout(self.hLayout01)
-        self.vLayout.addWidget(self.descLabel01)
-        #self.vLayout.addSeparator()
-        self.vLayout.addLayout(self.hLayout02)
-        self.vLayout.addWidget(self.descLabel02)
-        #self.vLayout.addSeparator()
-        self.vLayout.addLayout(self.hLayout03)
+        self.vLayoutMain.addLayout(self.hLayout00)
+        self.vLayoutMain.addWidget(self.descLabel00)
+        #self.vLayoutMain.addSeparator()
+        self.vLayoutMain.addLayout(self.hLayout01)
+        self.vLayoutMain.addWidget(self.descLabel01)
+        #self.vLayoutMain.addSeparator()
+        self.vLayoutMain.addLayout(self.hLayout02)
+        self.vLayoutMain.addWidget(self.descLabel02)
+        #self.vLayoutMain.addSeparator()
+        self.vLayoutMain.addLayout(self.hLayout03)
 
         self.BTinit = True #used to handle disconnects in the batchTypifier
         self.batchTypifier() #run last in initUI
