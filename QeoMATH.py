@@ -19,7 +19,6 @@ import fiona
 import shapely
 import traceback
 import math
-import QeoMAG as qg
 import os
 #import utm
 from pyproj import Transformer, Geod
@@ -103,18 +102,19 @@ def dataLoad(filename, data_object): #loads the data from a file
 
 
 def dataConvert(data_object): #DATA OBJECT MUST ALREADY BE STRIPPED AND SPLIT AND CLEANED!
+    if len(data_object) == 0: return 'False'
     testLen = len(data_object[0])
+    if testLen == 0: return 'False'
     data = []
     idx = -1
     for line in data_object:
         idx += 1
-        if len(line) != 0:
-            if idx == 0 and type(line[0]) is str:
-                 popidx = 0
-                 continue
+        if idx == 0 and isinstance(line[0], str):
+            try: float(line[0])
+            except ValueError: continue #skips a header, not a numeric string
         for item in line:
             try: float(item)
-            except:
+            except (ValueError, TypeError):
                 print('qm.dataConvert: return False')
                 return 'False'
         if len(line) != testLen:
@@ -122,15 +122,15 @@ def dataConvert(data_object): #DATA OBJECT MUST ALREADY BE STRIPPED AND SPLIT AN
             return 'False'
         else:
             data.append(line)
-    try: data.pop(popidx)
-    except Exception: pass
-    finally:
-        data = np.array(data, dtype=float)
-        print('qm.dataConvert: return npArray')
-        return data
+    if len(data) == 0: return 'False'
+    data = np.array(data, dtype=float)
+    print('qm.dataConvert: return npArray')
+    return data
 
 
 def dataClean(data_object, filetype, current_CRS, target_CRS):
+    if len(data_object) == 0: raise ValueError('No data to clean')
+    data_object = [list(line) for line in data_object] #keep raw input intact for retries
 
     #perform a filetype test. Current types = 'MagArrow2', 'GEMsys', and 'AeroSmartMag'
     #see QeoMAG.setSensorTypeConnect for the matching list
@@ -157,7 +157,9 @@ def dataClean(data_object, filetype, current_CRS, target_CRS):
                     break
             else:
                 continue
-        data = list(data_object[stix:eofx])
+        if stix < 0 or eofx <= stix:
+            raise ValueError('Could not find a complete GEMsys data chunk')
+        data = [line for line in data_object[stix:eofx] if len(line) > 0]
 
         badlineCounter = 0
         template = -1
@@ -193,15 +195,10 @@ def dataClean(data_object, filetype, current_CRS, target_CRS):
                 jdx += 1
                 if jdx > 0:
                     line.append('000.00') #adds dead laser data
-        idx = -1
-        for line in data:
-            idx += 1
-            if len(line) < 1: data.pop(idx)
-            else: continue
-
+        idxlist = []
         idx = -1
         for line in data: #concatenates the UTM zone number and letter into a decimal number
-            idx =+ 1
+            idx += 1
             if line[0] == 'time': continue #skips header line
             if len(line) == 21: #"Template 1" Concatenates zone columns only
                 template = 1
@@ -255,14 +252,13 @@ def dataClean(data_object, filetype, current_CRS, target_CRS):
                     continue
                 else: #'Template 0' data format unknown, but length is correct
                     template = 0
-                    data_object.pop(idx)
-                    idx += -1
+                    idxlist.append(idx)
                     badlineCounter += 1
                     continue
-            data_object.pop(idx)
-            idx += -1
+            idxlist.append(idx)
             badlineCounter += 1
             #continue unnecessary
+        for idx in reversed(idxlist): data.pop(idx)
         if ypr == True:
             data[0].pop(channel['roll'])
             data[0].pop(channel['pitch'])

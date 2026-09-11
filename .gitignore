@@ -1,0 +1,18 @@
+# Ignore new files unless explicitly allowed below.
+*
+
+# Repository configuration and primary application files.
+!.gitignore
+!QeoMAG.py
+!QeoMATH.py
+
+# Keep Python regression tests, including tests in subdirectories.
+!tests/
+!tests/**/
+!tests/**/*.py
+
+# Generated Python files remain ignored inside test directories.
+**/__pycache__/
+*.py[cod]
+
+# Add explicit exceptions here as application modules are introduced.

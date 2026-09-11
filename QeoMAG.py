@@ -39,6 +39,8 @@ class MainWindow(QMainWindow):
         #self.savedatafilename = ''
         self.localData = None
         self.masterData = np.array([[]])
+        self.masterHeaders = []
+        self.masterDataType = None
         self.listData = []
         self.dataType = 'MagArrow2'
         self.dataHeaders = []
@@ -373,12 +375,17 @@ class MainWindow(QMainWindow):
     def dataCleanConnect(self):
         try:
             self.pushCRS() #pushes the CRS to "global" variable
-            self.listData = qm.dataClean(self.listData, self.dataType, self.currentCRS, self.targetCRS)
+            listData = qm.dataClean(self.listData, self.dataType, self.currentCRS, self.targetCRS)
             #headers into separate list
-            self.dataHeaders = self.listData[0]
-            self.listData.pop(0)
-            #convert to np array
-            self.localData = np.array(self.listData, dtype=float)
+            dataHeaders = listData[0]
+            listData = listData[1:]
+            #convert to np array before changing the current dataset
+            localData = qm.dataConvert(listData)
+            if type(localData) is str: raise ValueError('Cleaned data could not be loaded into an array')
+            self.dataHeaders = dataHeaders
+            self.listData = listData
+            self.localData = localData
+            self.ledToGreen()
         except Exception as error:
             print('Failed to float data. Error: ', error)
             traceback.print_exc()
@@ -543,9 +550,9 @@ class MainWindow(QMainWindow):
         else: print('Error: Data not uploaded to Array')
 
     def plotMasterData(self):
-        if self.isArrayFulfilled == True and type(self.masterData) != None:
+        if self.masterData is not None and self.masterData.size > 0:
             global masterdataplot
-            try: masterdataplot = dataPlot(self.masterData, self.dataHeaders, self.dataType, State='unrotated')
+            try: masterdataplot = dataPlot(self.masterData, self.masterHeaders, self.masterDataType, State='unrotated', editable=False)
             except Exception as error:
                 print('Error: Could not plot data. ', error)
                 traceback.print_exc()
@@ -607,11 +614,20 @@ class MainWindow(QMainWindow):
     def loadToMasterArray(self):
         if self.isArrayFulfilled == True:
             if self.masterData.size == 0:
-                self.masterData = self.localData
+                if self.localData.ndim != 2 or self.localData.shape[1] != len(self.dataHeaders):
+                    self.masterLoadSuccess = 'Upload Error'
+                    self.masterArrayLabelSetText('red')
+                    print('Data columns do not match headers')
+                    return
+                self.masterData = self.localData.copy()
+                self.masterHeaders = list(self.dataHeaders)
+                self.masterDataType = self.dataType
                 self.masterLoadSuccess = 'Data Uploaded'
                 self.masterArrayLabelSetText('green')
             else:
                 try:
+                    if self.dataHeaders != self.masterHeaders or self.dataType != self.masterDataType:
+                        raise ValueError('Data headers and sensor must match the master array')
                     self.masterData = np.append(self.masterData, self.localData, axis=0)
                 except Exception as error:
                     print('Failed to append data to master array. Error: ', error)
@@ -676,7 +692,7 @@ class MainWindow(QMainWindow):
         if fileName:
             self.savedatafilename = fileName
             with open(fileName, 'w') as saveFile:
-                np.savetxt(fileName, self.masterData, fmt='%.12g', delimiter=',', header=','.join(self.dataHeaders), comments='')
+                np.savetxt(saveFile, self.masterData, fmt='%.12g', delimiter=' ', header=' '.join(self.masterHeaders), comments='')
                 #comments needs to be set to '' in order to avoid a leading '#' on the header line.
                 #%.7g will intelligently format everything up to 7 decimal places
                 #saveFile.write(str(self.textwidget.toPlainText()))
@@ -685,50 +701,56 @@ class MainWindow(QMainWindow):
     def autoEvaluation(self):
         try:
             print('Evaluating ', self.datafilename)
-            #toggles off printing to text
-            if self.toggleWriteToText == True:
-                self.toggleWriteToText = False
-                self.toggleWriteToTextButton.setText('Toggle Text Printout On')
-            self.listData = qm.dataClean(self.listData)
+            heading = float(self.headingBox.text())
+            tolerance = float(self.headingToleranceBox.text())
+            date = float(self.dateCollectedBox.text())
+            if not all(np.isfinite(value) for value in (heading, tolerance, date)):
+                raise ValueError('Heading, tolerance and date must be finite numbers')
+            if not 0 <= heading <= 360 or not 0 <= tolerance <= 180:
+                raise ValueError('Heading must be 0-360 and tolerance 0-180 degrees')
+            if self.dataType != 'GEMsys':
+                raise ValueError('Automatic evaluation currently requires GEMsys data; use the individual processing actions for other sensors')
+            self.pushCRS()
+            listData = qm.dataClean(self.listData, self.dataType, self.currentCRS, self.targetCRS)
             #headers into separate list
-            self.dataHeaders = self.listData[0]
-            self.listData.pop(0)
+            dataHeaders = listData[0]
+            listData = listData[1:]
             #convert to np array
-            self.localData = np.array(self.listData, dtype=float)
-            data = qm.dataConvert(self.listData)
-            if type(data) is not str:
-                self.localData = data
-                self.ledToGreen()
-            else:
-                self.ledToRed()
-                print('Data could not be loaded into an array. Check the input files for inconsitencies.')
-            self.localData = qm.headingPurge(self.localData, float(self.headingBox.text()),
-                                             float(self.headingToleranceBox.text()))
-            self.localData = qm.basicPurge(self.localData)
-            #self.localData = qm.boundaryPurge(self.localData, self.boundaryfilename)
-            data = qm.headingRotationTransform(self.localData, float(self.headingBox.text()), self.dataHeaders)
-            self.dataHeaders = data[0]
-            self.localData = data[1]
-            data = qm.addDateChannel(self.localData, self.dataHeaders, float(self.dateCollectedBox.text()))
-            self.dataHeaders = data[0]
-            self.localData = data[1]
+            localData = qm.dataConvert(listData)
+            if type(localData) is str:
+                raise ValueError('Data could not be loaded into an array. Check the input files for inconsistencies.')
+            localData = qm.headingPurge(localData, dataHeaders, self.dataType, heading, tolerance)
+            localData = qm.basicPurge(localData)
+            #localData = qm.boundaryPurge(localData, self.boundaryfilename)
+            dataHeaders, localData = qm.headingRotationTransform(localData, heading, dataHeaders)
+            dataHeaders, localData = qm.addDateChannel(localData, dataHeaders, date)
+            if localData.size == 0: raise ValueError('No data remains after automatic evaluation')
         except Exception as error:
             print('Failed to run automatic evaluation script. Error: ', error)
             traceback.print_exc()
-        finally:
+        else:
+            #Only replace the current dataset after all processing succeeds.
+            self.listData = listData
+            self.dataHeaders = dataHeaders
+            self.localData = localData
+            self.ledToGreen()
+            if self.toggleWriteToText == True:
+                self.toggleWriteToText = False
+                self.toggleWriteToTextButton.setText('Toggle Text Printout On')
             self.writeDataToTextWidget()
-            #self.plotData()
             self.plotRotatedData()
+
 
 class dataPlot:
     #This section/class is used for plotting the data
-    def __init__(self, data_object, headers, instrumentType, State='unrotated'):
+    def __init__(self, data_object, headers, instrumentType, State='unrotated', editable=True):
         #self.coordSys = 'UTM'
         self.plotData = data_object
         self.rectExtents = None
         self.state = State
         self.channel = {}
-        self.instrumentType = 'MagArrow2' #hardcoded: change this
+        self.instrumentType = instrumentType
+        self.editable = editable
         for i in range(len(headers)): self.channel[headers[i]] = i #CAN NOW CALL COLUMNS by eg. line[self.channel['utmN']]
         #if instrumentType == 'MagArrow2': self.coordSys = 'latlon' #should change this so it's not instrument dependent
         if self.state == 'rotated': self.plotRotate()
@@ -749,7 +771,7 @@ class dataPlot:
         self.coordSysE = 'utmE'
         self.coordSysN = 'utmN'
         self.magData = 'nT'
-        if self.instrumentType == 'MagArrow2': self.magData = 'Mag'
+        if self.instrumentType in ('MagArrow2', 'AeroSmartMag'): self.magData = 'Mag'
         '''
         #This section converts column headings to those of the specific instrument that needs them
 
@@ -801,7 +823,7 @@ class dataPlot:
         if self.dataType == 'MagArrow2': self.magData = 'Mag'
         '''
         self.magData = 'nT'
-        if self.instrumentType == 'MagArrow2': self.magData = 'Mag'
+        if self.instrumentType in ('MagArrow2', 'AeroSmartMag'): self.magData = 'Mag'
         for line in self.plotData:
             if line[self.channel['UTMx']] < self.smallest_E: self.smallest_E = line[self.channel['UTMx']]
             if line[self.channel['UTMx']] > self.largest_E: self.largest_E = line[self.channel['UTMx']]
@@ -862,6 +884,7 @@ class dataPlot:
     #    self.rectExtents = self.rrect.extents
 
     def ondelete(self, event):
+        if not self.editable or self.rectExtents is None: return
         if event.key == "delete":
             idx = -1
             idxlist = []
