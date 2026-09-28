@@ -514,7 +514,30 @@ def dataRepair(filePath): #attempts to repair data from a bad output stream
             data.append(columns)
         return data
 
-def basicPurge(data_object): #removes unlocked, bad heater, and ground data
+def basicPurge(data_object, data_headers=None, data_type=None): #removes unlocked, heater-status, and stationary data
+    """Apply the existing GEMsys rules using named columns.
+
+    Headers and sensor type are required. L/H are lock/heater status flags,
+    distinct from heater voltage or sensor temperature. Movement filtering
+    starts at the third sample and compares against the preceding input row.
+    """
+    if data_type != 'GEMsys':
+        raise ValueError('Basic purge requires GEMsys data and sensor type')
+    if not isinstance(data_object, np.ndarray) or data_object.ndim != 2:
+        raise ValueError('Basic purge requires a two-dimensional data array')
+    if data_headers is None or data_object.shape[1] != len(data_headers):
+        raise ValueError('Basic purge requires headers matching the data columns')
+    for name in ('L', 'H', 'utmE', 'utmN'):
+        if list(data_headers).count(name) != 1:
+            raise ValueError('Basic purge requires exactly one ' + name + ' column')
+    channel = {}
+    for i in range(len(data_headers)): channel[data_headers[i]] = i
+    required_data = data_object[:, [channel[name] for name in ('L', 'H', 'utmE', 'utmN')]]
+    if not np.issubdtype(required_data.dtype, np.number) or np.iscomplexobj(required_data):
+        raise ValueError('Basic purge status and coordinate values must be real numbers')
+    if not np.all(np.isfinite(required_data)):
+        raise ValueError('Basic purge status and coordinate values must be finite numbers')
+
     idx = -1
     idxlist = []
     unlocked_counter = 0
@@ -523,17 +546,17 @@ def basicPurge(data_object): #removes unlocked, bad heater, and ground data
 
     for line in data_object:
         idx += 1
-        if line[2] == 0: #purges unlocked data
+        if line[channel['L']] == 0: #purges unlocked data
             idxlist.append(idx)
             unlocked_counter += 1
             continue
-        elif line[3] == 0: #purges data where the heater temperature is out of range
+        elif line[channel['H']] == 0: #preserves the existing zero heater-status rejection rule
             idxlist.append(idx)
             badheater_counter += 1
             continue
         elif idx >=2: #positional removal
-                if abs(data_object[idx][14] - data_object[idx - 1][14]) < 0.2:
-                    if abs(data_object[idx][15] - data_object[idx - 1][15]) < 0.2:
+                if abs(data_object[idx][channel['utmE']] - data_object[idx - 1][channel['utmE']]) < 0.2:
+                    if abs(data_object[idx][channel['utmN']] - data_object[idx - 1][channel['utmN']]) < 0.2:
                         idxlist.append(idx)
                         stopped_counter += 1
                         continue
@@ -545,7 +568,7 @@ def basicPurge(data_object): #removes unlocked, bad heater, and ground data
         data_object = np.delete(data_object, idxlist, axis=0)
 
     print('Unlocked data points removed: ', unlocked_counter)
-    print('Overheated data points removed: ', badheater_counter)
+    print('Heater-status data points removed: ', badheater_counter)
     print('Stopped data points removed: ', stopped_counter)
 
     return data_object

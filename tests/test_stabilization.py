@@ -30,6 +30,8 @@ PLOT = functions('QeoMAG.py', 'dataPlot')
 
 def gem_rows():
     headers = ['time', 'nT'] + ['c' + str(i) for i in range(2, 20)]
+    #Verified GEM export status names: https://github.com/ugcs/GeoHammer/issues/113
+    headers[2:4] = ['L', 'H']
     headers[14:16] = ['utmE', 'utmN']
     headers[19] = 'laser'
     row = ['1'] * 20
@@ -328,6 +330,101 @@ class StabilizationTests(unittest.TestCase):
                 self.assertEqual(w.dataHeaders, headers)
                 self.assertTrue(w.isArrayFulfilled)
                 w.writeDataToTextWidget.assert_called_once()
+
+    def test_basic_purge_preserves_rules_with_reordered_columns(self):
+        headers = ['sample', 'L', 'H', 'utmE', 'utmN', 'V-heater', 'sensor-temp']
+        data = np.array([
+            [0, 1, 1, 0, 0, 0, 0],    #Unrelated zero readings do not reject this row.
+            [1, 1, 1, 0, 0, 0, 0],    #Second sample remains exempt from movement rule.
+            [2, 0, 0, 10, 10, 9, 50], #Lock rule wins over heater rule.
+            [3, 1, 0, 20, 20, 9, 50],
+            [4, 1, 1, 20, 20, 9, 50], #Compared to removed input row 3, not row 1.
+            [5, 1, 1, 21, 20, 9, 50],
+        ], dtype=float)
+        for order in (list(range(7)), [4, 6, 2, 0, 5, 3, 1]):
+            with self.subTest(order=order):
+                reordered = data[:, order].copy()
+                names = [headers[i] for i in order]
+                before = reordered.copy()
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    result = MATH['basicPurge'](reordered, names, 'GEMsys')
+                np.testing.assert_array_equal(result, before[[0, 1, 5]])
+                np.testing.assert_array_equal(reordered, before)
+                self.assertEqual(names, [headers[i] for i in order])
+                self.assertIn('Unlocked data points removed:  1', output.getvalue())
+                self.assertIn('Heater-status data points removed:  1', output.getvalue())
+                self.assertIn('Stopped data points removed:  1', output.getvalue())
+
+    def test_basic_purge_preserves_movement_threshold(self):
+        for east, north, keep in ((0.19, 0.19, False), (0.2, 0, True),
+                                  (0, -0.2, True), (0.21, 0, True)):
+            with self.subTest(east=east, north=north):
+                data = np.array([[1., 1., 0., 0.], [1., 1., 0., 0.],
+                                 [1., 1., east, north]])
+                result = MATH['basicPurge'](data, ['L', 'H', 'utmE', 'utmN'], 'GEMsys')
+                np.testing.assert_array_equal(result, data if keep else data[:2])
+
+    def test_basic_purge_empty_single_and_all_removed(self):
+        for values, expected_count in (([], 0), ([[1, 1, 0, 0]], 1),
+                                       ([[0, 1, 0, 0]], 0),
+                                       ([[0, 1, 0, 0], [1, 0, 1, 1]], 0)):
+            with self.subTest(values=values):
+                data = np.array(values, dtype=float).reshape(-1, 4)
+                result = MATH['basicPurge'](data, ['L', 'H', 'utmE', 'utmN'], 'GEMsys')
+                self.assertEqual(result.shape, (expected_count, 4))
+
+    def test_basic_purge_rejects_invalid_schema_and_values(self):
+        headers = ['L', 'H', 'utmE', 'utmN']
+        cases = [(np.ones((2, 4)), headers, sensor)
+                 for sensor in (None, 'MagArrow2', 'AeroSmartMag', 'unknown')]
+        cases += [(data, names, 'GEMsys') for data, names in (
+            ([], headers), (np.ones(4), headers), (np.ones((2, 3)), headers),
+            (np.ones((2, 4)), None),
+            (np.ones((2, 4)), ['c2', 'H', 'utmE', 'utmN']),
+            (np.ones((2, 4)), ['L', 'V-heater', 'utmE', 'utmN']),
+            (np.ones((2, 5)), headers + ['L']),
+            (np.ones((2, 4), dtype=complex), headers),
+            (np.array([['1', '1', '0', '0']]), headers))]
+        for column in range(4):
+            for value in (float('nan'), float('inf')):
+                data = np.ones((2, 4)); data[1, column] = value
+                cases.append((data, headers, 'GEMsys'))
+        for data, names, sensor in cases:
+            with self.subTest(names=names, sensor=sensor):
+                before, old_names = copy.deepcopy(data), copy.deepcopy(names)
+                with self.assertRaises(ValueError): MATH['basicPurge'](data, names, sensor)
+                np.testing.assert_array_equal(data, before)
+                self.assertEqual(names, old_names)
+        with self.assertRaises(ValueError): MATH['basicPurge'](np.ones((2, 20)))
+
+    def test_manual_basic_purge_passes_metadata_and_preserves_failures(self):
+        for sensor, names, succeeds in (
+            ('GEMsys', ['utmN', 'H', 'L', 'utmE'], True),
+            ('GEMsys', ['utmN', 'V-heater', 'L', 'utmE'], False),
+            ('MagArrow2', ['utmN', 'H', 'L', 'utmE'], False)):
+            with self.subTest(sensor=sensor, names=names):
+                w = self.window()
+                w.dataType, w.dataHeaders = sensor, names.copy()
+                w.localData = np.array([[0., 1., 0., 0.], [1., 1., 1., 1.]])
+                original, before = w.localData, w.localData.copy()
+                with patch.dict(GUI, qm=SimpleNamespace(**MATH)): GUI['purgeUnlockedData'](w)
+                if succeeds: np.testing.assert_array_equal(w.localData, before[1:])
+                else: self.assertIs(w.localData, original)
+                np.testing.assert_array_equal(original, before)
+                self.assertEqual(w.dataHeaders, names)
+                self.assertTrue(w.isArrayFulfilled)
+                w.writeDataToTextWidget.assert_called_once()
+
+    def test_auto_missing_status_header_preserves_dataset(self):
+        w = self.window()
+        w.listData[0][2] = 'unknown'
+        original, raw = w.localData, copy.deepcopy(w.listData)
+        with patch.dict(GUI, qm=SimpleNamespace(**MATH)): GUI['autoEvaluation'](w)
+        self.assertIs(w.localData, original)
+        self.assertEqual(w.dataHeaders, ['utmE', 'utmN'])
+        self.assertEqual(w.listData, raw)
+        w.plotRotatedData.assert_not_called()
+        w.ledToGreen.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

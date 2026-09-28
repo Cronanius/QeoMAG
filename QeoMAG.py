@@ -404,7 +404,7 @@ class MainWindow(QMainWindow):
 
     def purgeUnlockedData(self):
         if self.isArrayFulfilled == True:
-            try: self.localData = qm.basicPurge(self.localData)
+            try: self.localData = qm.basicPurge(self.localData, self.dataHeaders, self.dataType)
             except Exception as error:
                 print('Failed to purge unlocked data. Error: ', error)
                 traceback.print_exc()
@@ -720,7 +720,7 @@ class MainWindow(QMainWindow):
             if type(localData) is str:
                 raise ValueError('Data could not be loaded into an array. Check the input files for inconsistencies.')
             localData = qm.headingPurge(localData, dataHeaders, self.dataType, heading, tolerance)
-            localData = qm.basicPurge(localData)
+            localData = qm.basicPurge(localData, dataHeaders, self.dataType)
             #localData = qm.boundaryPurge(localData, self.boundaryfilename)
             dataHeaders, localData = qm.headingRotationTransform(localData, heading, dataHeaders)
             dataHeaders, localData = qm.addDateChannel(localData, dataHeaders, date)
