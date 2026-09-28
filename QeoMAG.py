@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
 
         #Data entry boxen
         self.headingBox = QLineEdit()
-        self.headingBox.setPlaceholderText('Drone Heading (0-180)')
+        self.headingBox.setPlaceholderText('Heading 0-360 (N=0, E=90)')
         self.headingToleranceBox = QLineEdit()
         self.headingToleranceBox.setPlaceholderText('Heading ±Tolerance')
         self.magCutoffBoxUpper = QLineEdit()

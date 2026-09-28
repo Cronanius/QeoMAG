@@ -597,65 +597,52 @@ def boundaryPurge(data_object, shapefilename): #removes data from outside of a g
         return data_object
 
 def headingPurge(data_object, data_headers, data_type, heading_azimuth=89.75, heading_tolerance=3): #removes data from turns etc
+    """Filter a survey axis using projected coordinates: 0 north, 90 east.
+
+    Both travel directions are accepted. The first sample and stationary
+    samples have no measurable heading and are retained. Sensor names remain
+    part of the public signature; normalized utmE/utmN columns drive filtering.
+    """
+    heading_azimuth = float(heading_azimuth)
+    heading_tolerance = float(heading_tolerance)
+    if not math.isfinite(heading_azimuth) or not 0 <= heading_azimuth <= 360:
+        raise ValueError('Heading must be a finite number between 0 and 360 degrees')
+    if not math.isfinite(heading_tolerance) or not 0 <= heading_tolerance <= 180:
+        raise ValueError('Heading tolerance must be a finite number between 0 and 180 degrees')
+    if not isinstance(data_object, np.ndarray) or data_object.ndim != 2:
+        raise ValueError('Heading filtering requires a two-dimensional data array')
+    if data_object.shape[1] != len(data_headers):
+        raise ValueError('Data columns do not match headers')
+    for name in ('utmE', 'utmN'):
+        if list(data_headers).count(name) != 1:
+            raise ValueError('Heading filtering requires exactly one ' + name + ' column')
 
     idx = -1
     idxlist = []
     badheading_counter = 0
-    reverse_azimuth = 0
     channel = {}
-    headers = data_headers
-    for i in range(len(headers)): channel[headers[i]] = i
+    for i in range(len(data_headers)): channel[data_headers[i]] = i
+    coordinates = data_object[:, [channel['utmE'], channel['utmN']]]
+    if not np.issubdtype(coordinates.dtype, np.number) or np.iscomplexobj(coordinates):
+        raise ValueError('Heading coordinates must be real numbers')
+    if not np.all(np.isfinite(coordinates)):
+        raise ValueError('Heading coordinates must be finite numbers')
 
-    if heading_azimuth < 0.0: print("Azimuth < 0 degrees. Please input azimuth between 0.0 and 180.0")
-    elif heading_azimuth > 360.0:
-        print("Azimuth > 360 degrees. Please input azimuth between 0.0 and 360.0")
-    else:
-        if heading_azimuth > 180: heading_azimuth = heading_azimuth - 180
-        reverse_azimuth = math.radians(heading_azimuth) - math.pi #atan2 outputs a value between 0 and pi and 0 and -pi. This is how I'm dealing with it.
-        heading_azimuth = math.radians(heading_azimuth)
-        heading_tolerance = math.radians(heading_tolerance)
-        heading_range = ((heading_azimuth + heading_tolerance, heading_azimuth - heading_tolerance), (reverse_azimuth - heading_tolerance, reverse_azimuth + heading_tolerance))
-        print(heading_range)
-
-    #elif heading_azimuth >= 180.0: reverse_azimuth = heading_azimuth - 180.0
-    if data_type == 'GEMsys':
-        for line in data_object:
-            idx += 1
-            if idx < 1: continue #skips first line, need 2 points for a heading
-            #utmE = line[channel['utmE']]
-            #utmN = line[channel['utmN']]
-            x = data_object[idx - 1][14] - data_object[idx][14]
-            y = data_object[idx - 1][15] - data_object[idx][15]
-
-            heading = math.atan2(y, x) #atan2 is (y, x), rather than x, y. It's dumb.
-
-            if heading_range[0][0] >= heading >= heading_range[0][1]: continue
-            if heading_range[1][0] <= heading <= heading_range[1][1]: continue
-
-            idxlist.append(idx)
-            badheading_counter += 1
-            continue
-    elif data_type == 'MagArrow2':
-        #print('MagArrow2 Heading Loaded')
-        #print(data_object[0])
-        #geod = Geod(ellps='WGS84')
-        for line in data_object:
-            idx += 1
-            if idx < 1: continue #skips first line, need 2 points for a heading
-            #utmE = line[channel['utmE']]
-            #utmN = line[channel['utmN']]
-            x = data_object[idx - 1][10] - data_object[idx][10] #these second indexes for some reason can't be input as variables. Unsure as to why.
-            y = data_object[idx - 1][11] - data_object[idx][11]
-            #print ("x,y", x,y)
-
-            heading = math.atan2(y, x) #atan2 is (y, x), rather than x, y. It's dumb.
-
-            if heading_range[0][0] >= heading >= heading_range[0][1]: continue
-            if heading_range[1][0] <= heading <= heading_range[1][1]: continue
-
-            idxlist.append(idx)
-            badheading_counter += 1
-            continue
+    for line in data_object:
+        idx += 1
+        if idx < 1: continue #need two samples for a heading
+        x = float(line[channel['utmE']]) - float(data_object[idx - 1][channel['utmE']])
+        y = float(line[channel['utmN']]) - float(data_object[idx - 1][channel['utmN']])
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError('Coordinate differences must be finite')
+        if x == 0 and y == 0: continue #stationary removal belongs to a separate filter
+        heading = math.degrees(math.atan2(x, y))
+        #Modulo 180 compares a survey axis, including the reverse travel direction.
+        difference = abs((heading - heading_azimuth + 90) % 180 - 90)
+        #Allow only rounding noise at an inclusive tolerance boundary.
+        if difference <= heading_tolerance or math.isclose(difference, heading_tolerance, rel_tol=0, abs_tol=1e-10): continue
+        idxlist.append(idx)
+        badheading_counter += 1
 
     if len(idxlist) > 0:
         idxlist = np.array(idxlist)

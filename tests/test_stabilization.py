@@ -122,8 +122,11 @@ class StabilizationTests(unittest.TestCase):
 
     def test_auto_success_uses_current_signatures(self):
         w = self.window()
+        w.listData[1][14:16] = ['100', '200']
+        w.listData[2][14:16] = ['110', '200']
         qm = SimpleNamespace(**{name: value for name, value in MATH.items() if callable(value)})
         with patch.dict(GUI, qm=qm): GUI['autoEvaluation'](w)
+        np.testing.assert_array_equal(w.localData[:, 14:16], [[100, 200], [110, 200]])
         self.assertEqual(w.localData.shape[1], len(w.dataHeaders))
         self.assertIn('date', w.dataHeaders)
         w.plotRotatedData.assert_called_once()
@@ -155,6 +158,95 @@ class StabilizationTests(unittest.TestCase):
         w = SimpleNamespace(plotIt=Mock())
         PLOT['__init__'](w, np.ones((1, 3)), ['utmE', 'utmN', 'nT'], 'GEMsys')
         self.assertEqual(w.instrumentType, 'GEMsys')
+
+    def test_heading_accepts_compass_tracks_and_reverse_passes(self):
+        #Coordinates are deliberately reordered and separated by an unrelated column.
+        headers = ['utmN', 'sample', 'utmE']
+        for sensor in ('GEMsys', 'MagArrow2', 'AeroSmartMag'):
+            for heading in (0, 30, 45, 90, 179, 180, 270, 359, 360):
+                for direction in (-1, 1):
+                    with self.subTest(sensor=sensor, heading=heading, direction=direction):
+                        theta = math.radians(heading)
+                        data = np.array([[i * direction * math.cos(theta), i,
+                                          i * direction * math.sin(theta)] for i in range(3)])
+                        before = data.copy()
+                        result = MATH['headingPurge'](data, headers, sensor, heading, 0.01)
+                        np.testing.assert_array_equal(result, before)
+                        np.testing.assert_array_equal(data, before)
+                        self.assertEqual(headers, ['utmN', 'sample', 'utmE'])
+
+    def test_heading_wraps_and_includes_tolerance_boundary(self):
+        cases = ((359, 1, 3, True), (1, 359, 3, True),
+                 (360, 357, 3, True), (360, 356.999, 3, False),
+                 (179, 1, 3, True), (1, 179, 3, True),
+                 (0, 45, 45, True), (0, 45, 44.99, False),
+                 (0, 0, 0, True), (0, 90, 3, False))
+        for heading, bearing, tolerance, keep in cases:
+            with self.subTest(heading=heading, bearing=bearing, tolerance=tolerance):
+                theta = math.radians(bearing)
+                data = np.array([[0., 0.], [math.sin(theta), math.cos(theta)]])
+                result = MATH['headingPurge'](data, ['utmE', 'utmN'], 'GEMsys', heading, tolerance)
+                np.testing.assert_array_equal(result, data if keep else data[:1])
+
+    def test_heading_uses_original_adjacent_samples_and_preserves_input(self):
+        data = np.array([[0., 0.], [0., 1.], [1., 1.], [1., 2.]])
+        before = data.copy()
+        headers = ['utmE', 'utmN']
+        result = MATH['headingPurge'](data, headers, 'GEMsys', 0, 0)
+        np.testing.assert_array_equal(result, before[[0, 1, 3]])
+        np.testing.assert_array_equal(data, before)
+        self.assertEqual(headers, ['utmE', 'utmN'])
+
+    def test_heading_retains_empty_single_and_stationary_samples(self):
+        for data in (np.empty((0, 2)), np.array([[1., 2.]]), np.ones((3, 2))):
+            with self.subTest(shape=data.shape):
+                result = MATH['headingPurge'](data, ['utmE', 'utmN'], 'GEMsys', 90, 0)
+                np.testing.assert_array_equal(result, data)
+
+    def test_heading_rejects_invalid_inputs(self):
+        cases = [(np.ones((2, 2)), ['utmE', 'utmN'], h, t)
+                 for h, t in ((-1, 3), (361, 3), (float('nan'), 3),
+                              (float('inf'), 3), (0, -1), (0, 181),
+                              (0, float('nan')), (0, float('inf')))]
+        cases += [(data, headers, 0, 3) for data, headers in (
+            ([], ['utmE', 'utmN']),
+            (np.ones(2), ['utmE', 'utmN']),
+            (np.ones((2, 3)), ['utmE', 'utmN']),
+            (np.ones((2, 2)), ['utmE', 'other']),
+            (np.ones((2, 3)), ['utmE', 'utmN', 'utmE']),
+            (np.array([[0., float('nan')]]), ['utmE', 'utmN']),
+            (np.array([[float('inf'), 0.]]), ['utmE', 'utmN']),
+            (np.array([['1', '2']]), ['utmE', 'utmN']),
+            (np.ones((1, 2), dtype=complex), ['utmE', 'utmN']))]
+        for data, headers, heading, tolerance in cases:
+            with self.subTest(headers=headers, heading=heading, tolerance=tolerance):
+                before = copy.deepcopy(data)
+                with self.assertRaises(ValueError):
+                    MATH['headingPurge'](data, headers, 'GEMsys', heading, tolerance)
+                np.testing.assert_array_equal(data, before)
+
+    def test_manual_heading_failure_preserves_dataset(self):
+        w = self.window()
+        w.dataHeaders = ['utmE', 'missing']
+        before = w.localData
+        with patch.dict(GUI, qm=SimpleNamespace(**MATH)):
+            GUI['purgeBadHeadingData'](w)
+        self.assertIs(w.localData, before)
+        self.assertEqual(w.dataHeaders, ['utmE', 'missing'])
+        w.writeDataToTextWidget.assert_called_once()
+
+    def test_auto_invalid_coordinates_preserve_dataset(self):
+        w = self.window()
+        w.listData[2][14] = 'nan'
+        before = w.localData
+        raw = copy.deepcopy(w.listData)
+        with patch.dict(GUI, qm=SimpleNamespace(**MATH)):
+            GUI['autoEvaluation'](w)
+        self.assertIs(w.localData, before)
+        self.assertEqual(w.dataHeaders, ['utmE', 'utmN'])
+        self.assertEqual(w.listData, raw)
+        w.plotRotatedData.assert_not_called()
+        w.ledToGreen.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
