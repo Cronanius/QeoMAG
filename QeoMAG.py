@@ -469,7 +469,7 @@ class MainWindow(QMainWindow):
     def magCutoff(self):
         if self.isArrayFulfilled == True:
             try: self.localData = qm.magCutoff(self.localData, float(self.magCutoffBoxLower.text()),
-                                               float(self.magCutoffBoxUpper.text()))
+                                               float(self.magCutoffBoxUpper.text()), self.dataHeaders, self.dataType)
             except Exception as error:
                 print('Failed to run mag cutoff script. Error: ', error)
                 traceback.print_exc()

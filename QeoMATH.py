@@ -651,16 +651,41 @@ def headingPurge(data_object, data_headers, data_type, heading_azimuth=89.75, he
 
     return data_object
 
-def magCutoff(data_object, lower_cutoff, upper_cutoff):
+def magCutoff(data_object, lower_cutoff, upper_cutoff, data_headers=None, data_type=None):
+    """Keep finite magnetic readings strictly between the cutoff limits.
 
-    idx = -1 #indexed for a "header" line
+    Callers must now supply headers and sensor type; column order is not assumed.
+    The original three positional arguments retain their order.
+    """
+    lower_cutoff = float(lower_cutoff)
+    upper_cutoff = float(upper_cutoff)
+    if not math.isfinite(lower_cutoff) or not math.isfinite(upper_cutoff) or lower_cutoff >= upper_cutoff:
+        raise ValueError('Cutoffs must be finite numbers with lower less than upper')
+    if not isinstance(data_object, np.ndarray) or data_object.ndim != 2:
+        raise ValueError('Magnetic cutoff requires a two-dimensional data array')
+    if data_headers is None or data_type is None:
+        raise ValueError('Magnetic cutoff requires data headers and sensor type')
+    if data_object.shape[1] != len(data_headers):
+        raise ValueError('Data columns do not match headers')
+    if data_type == 'GEMsys': mag_channel = 'nT'
+    elif data_type in ('MagArrow2', 'AeroSmartMag'): mag_channel = 'Mag'
+    else: raise ValueError('Unsupported sensor type for magnetic cutoff: ' + str(data_type))
+    if list(data_headers).count(mag_channel) != 1:
+        raise ValueError('Magnetic cutoff requires exactly one ' + mag_channel + ' column')
+    channel = {}
+    for i in range(len(data_headers)): channel[data_headers[i]] = i
+    magnetic_data = data_object[:, channel[mag_channel]]
+    if not np.issubdtype(magnetic_data.dtype, np.number) or np.iscomplexobj(magnetic_data):
+        raise ValueError('Magnetic readings must be real numbers')
+
+    idx = -1
     idxlist = []
     cutoff_counter = 0
 
     for line in data_object:
         idx += 1
-        if idx == 0: continue #skips header line
-        if upper_cutoff > line[1] > lower_cutoff:
+        value = line[channel[mag_channel]]
+        if np.isfinite(value) and upper_cutoff > value > lower_cutoff:
             continue
         else:
             idxlist.append(idx)

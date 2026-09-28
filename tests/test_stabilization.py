@@ -248,5 +248,86 @@ class StabilizationTests(unittest.TestCase):
         w.plotRotatedData.assert_not_called()
         w.ledToGreen.assert_not_called()
 
+    def test_cutoff_filters_first_sample_and_uses_sensor_channel(self):
+        for sensor, magnetic in (('GEMsys', 'nT'), ('MagArrow2', 'Mag'), ('AeroSmartMag', 'Mag')):
+            for column in (0, 1, 2):
+                with self.subTest(sensor=sensor, column=column):
+                    headers = ['sample', 'other']
+                    headers.insert(column, magnetic)
+                    data = np.insert(np.array([[0., 999.], [1., 999.], [2., 999.]]),
+                                     column, [200., 50., 75.], axis=1)
+                    before = data.copy()
+                    original_headers = headers.copy()
+                    result = MATH['magCutoff'](data, 0, 100, headers, sensor)
+                    np.testing.assert_array_equal(result, before[1:])
+                    np.testing.assert_array_equal(data, before)
+                    self.assertEqual(headers, original_headers)
+
+    def test_cutoff_preserves_strict_boundaries_and_removes_nonfinite_readings(self):
+        data = np.array([[v, i] for i, v in enumerate(
+            [0., 0.001, 99.999, 100., float('nan'), float('inf'), -float('inf')])])
+        before = data.copy()
+        result = MATH['magCutoff'](data, 0, 100, ['Mag', 'sample'], 'MagArrow2')
+        np.testing.assert_array_equal(result, before[[1, 2]])
+        np.testing.assert_array_equal(data, before)
+
+    def test_cutoff_handles_empty_and_single_sample_arrays(self):
+        for values, expected in (([], []), ([50.], [50.]), ([200.], [])):
+            with self.subTest(values=values):
+                data = np.array(values).reshape(-1, 1)
+                result = MATH['magCutoff'](data, 0, 100, ['nT'], 'GEMsys')
+                np.testing.assert_array_equal(result, np.array(expected).reshape(-1, 1))
+
+    def test_cutoff_rejects_invalid_limits_and_metadata_without_mutation(self):
+        cases = [(np.ones((2, 1)), lo, hi, ['nT'], 'GEMsys') for lo, hi in
+                 ((100, 0), (0, 0), (float('nan'), 100), (0, float('nan')),
+                  (-float('inf'), 100), (0, float('inf')), ('bad', 100))]
+        cases += [(data, 0, 100, headers, sensor) for data, headers, sensor in (
+            ([], ['nT'], 'GEMsys'),
+            (np.ones(2), ['nT'], 'GEMsys'),
+            (np.ones((2, 2)), ['nT'], 'GEMsys'),
+            (np.ones((2, 1)), None, 'GEMsys'),
+            (np.ones((2, 1)), ['nT'], None),
+            (np.ones((2, 1)), ['nT'], 'unknown'),
+            (np.ones((2, 1)), ['Mag'], 'GEMsys'),
+            (np.ones((2, 1)), ['nT'], 'MagArrow2'),
+            (np.ones((2, 2)), ['nT', 'nT'], 'GEMsys'),
+            (np.array([['50']]), ['nT'], 'GEMsys'),
+            (np.ones((2, 1), dtype=complex), ['nT'], 'GEMsys'))]
+        for data, lo, hi, headers, sensor in cases:
+            with self.subTest(lo=lo, hi=hi, headers=headers, sensor=sensor):
+                before = copy.deepcopy(data)
+                original_headers = copy.deepcopy(headers)
+                with self.assertRaises(ValueError):
+                    MATH['magCutoff'](data, lo, hi, headers, sensor)
+                np.testing.assert_array_equal(data, before)
+                self.assertEqual(headers, original_headers)
+        with self.assertRaisesRegex(ValueError, 'headers and sensor'):
+            MATH['magCutoff'](np.ones((2, 1)), 0, 100)
+
+    def test_manual_cutoff_passes_metadata_and_preserves_dataset_on_failure(self):
+        for headers, upper, succeeds in ((['Mag', 'sample'], '100', True),
+                                        (['wrong', 'sample'], '100', False),
+                                        (['Mag', 'sample'], 'bad', False)):
+            with self.subTest(headers=headers, upper=upper):
+                w = self.window()
+                w.localData = np.array([[200., 1.], [50., 2.]])
+                w.dataHeaders = headers.copy()
+                w.dataType = 'AeroSmartMag'
+                w.magCutoffBoxLower = SimpleNamespace(text=lambda: '0')
+                w.magCutoffBoxUpper = SimpleNamespace(text=lambda: upper)
+                original = w.localData
+                before = original.copy()
+                with patch.dict(GUI, qm=SimpleNamespace(**MATH)):
+                    GUI['magCutoff'](w)
+                if succeeds:
+                    np.testing.assert_array_equal(w.localData, before[1:])
+                else:
+                    self.assertIs(w.localData, original)
+                np.testing.assert_array_equal(original, before)
+                self.assertEqual(w.dataHeaders, headers)
+                self.assertTrue(w.isArrayFulfilled)
+                w.writeDataToTextWidget.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main()
